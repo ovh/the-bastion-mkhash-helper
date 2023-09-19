@@ -1,3 +1,4 @@
+// vim: set ts=4 sw=4 sts=4 noet:
 /*
  * Licensed under the Apache License, Version 2.0 (the "License"); you may not use this
  * file except in compliance with the License. You may obtain a copy of the License at
@@ -23,6 +24,7 @@ import (
 	"golang.org/x/crypto/scrypt"
 	"io"
 	"os"
+	"regexp"
 	"runtime"
 	"strings"
 )
@@ -32,9 +34,14 @@ var version = "undefined"
 var date = "undefined"
 var commit = "undefined"
 
+// both salt and base64-encoded hash must only contain these chars
+const allowedChars = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+var validSalt = regexp.MustCompile(`^[` + allowedChars + `]+\z`)
+
 // specific Encoding with a different alphabet ordering than StdEncoding,
 // used to encode type8 and type9 passwords
-var CiscoEncoding = base64.NewEncoding("./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz").WithPadding(base64.NoPadding)
+var CiscoEncoding = base64.NewEncoding(allowedChars).WithPadding(base64.NoPadding)
 
 // type8 and type9 crypto parameters taken from https://github.com/openwall/john/issues/711
 func type8(password string, salt string) string {
@@ -70,29 +77,58 @@ func salt(size int) string {
 	return CiscoEncoding.EncodeToString(buf)[:size]
 }
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "--version" {
-		fmt.Printf("Version %q (%s-%s) build at %s\n", version, commit, runtime.Version(), date)
-		os.Exit(0)
-	}
+func usage() {
+	fmt.Fprintf(os.Stderr,
+		`Usage: %s [OPTIONS]
 
-	if len(os.Args) != 1 {
-		fmt.Fprintf(os.Stderr,
-			`Usage: %s [--version]
+  --salt-type8 SALT   Specify a fixed salt for type8
+  --salt-type9 SALT   Specify a fixed salt for type9
+  --version           Show version info
 
-To hash a password, simply push the password to STDIN, taking care
-to not leak it to tools such as 'ps', e.g. using bash:
+Type8 is a 256 bits PBKDF2-derived key with 16384 iterations using SHA256 for HMAC
+Type9 is a 256 bits Scrypt-derived key with N=20000, r=1 and p=1
 
-  %s <<< "my password"
+To hash a password, simply start the program, enter the password to hash and press ENTER.
 
-or
+Check the README for other ways to invoke the program in non-interactive ways with hints
+to avoid leaking the password to tools such as 'ps' or your shell history.
 
-  echo "my password" | %s
+`, os.Args[0])
+}
 
-as 'echo' is usually a shell builtin, hence not appearing in 'ps'
-
-`, os.Args[0], os.Args[0], os.Args[0])
+func mustValidateSalt(salt string) string {
+	if len(salt) < 4 || len(salt) > 32 {
+		fmt.Fprintln(os.Stderr, "Salt length must be between 4 and 32 chars")
 		os.Exit(-1)
+	}
+	if !validSalt.MatchString(salt) {
+		fmt.Fprintf(os.Stderr, "Invalid salt, contains a char which is not part of the allowed chars list %q\n",
+			allowedChars)
+		os.Exit(-1)
+	}
+	return salt
+}
+
+func main() {
+	// set default salts
+	saltType8 := salt(14)
+	saltType9 := salt(14)
+
+	// parse the args
+	for i := 1; i < len(os.Args); i++ {
+		if os.Args[i] == "--version" {
+			fmt.Printf("Version %q (%s-%s) build at %s\n", version, commit, runtime.Version(), date)
+			os.Exit(0)
+		} else if os.Args[i] == "--salt-type8" && len(os.Args) >= i+2 {
+			saltType8 = mustValidateSalt(os.Args[i+1])
+			i++
+		} else if os.Args[i] == "--salt-type9" && len(os.Args) >= i+2 {
+			saltType9 = mustValidateSalt(os.Args[i+1])
+			i++
+		} else {
+			usage()
+			os.Exit(-1)
+		}
 	}
 
 	// read the password and trim the ending \n
@@ -109,8 +145,8 @@ as 'echo' is usually a shell builtin, hence not appearing in 'ps'
 			Type9       string
 			PasswordLen int
 		}{
-			type8(password, salt(14)),
-			type9(password, salt(14)),
+			type8(password, saltType8),
+			type9(password, saltType9),
 			len(password),
 		})
 
